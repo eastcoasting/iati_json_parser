@@ -1,0 +1,14 @@
+[project]
+name="iati_json_parser"
+description = "IATI XML to json parser"
+readme="README.md"
+repository="https://github.com/eastcoasting/iati_json_parser"
+license = {text= "MIT"}
+dependencies = ["xmlschema"]
+
+[build-system]
+requires = ["maturin>=0.13,<0.14"]
+build-backend = "maturin"
+
+[project.optional-dependencies]
+dev = ["pytest"]
