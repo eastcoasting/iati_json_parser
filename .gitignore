@@ -1,0 +1,8 @@
+/target
+test.json
+.ve
+__pycache__
+iati_json_parser/*.so
+_build
+/dist
+/venv
