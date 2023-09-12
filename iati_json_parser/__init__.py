@@ -39,8 +39,9 @@ def get_arrays_from_schemas(schemas=None):
     return list_paths
 
 
-def convert(input, file=None, pretty=False, schemas=None, arrays=None):
+def convert(input, pretty=False, schemas=None, arrays=None):
 
     if not arrays and schemas:
         arrays = get_arrays_from_schemas(tuple(schemas))
-    return convert_rs(input, file, pretty, arrays)
+
+    return convert_rs(input, pretty, arrays)

@@ -1,12 +1,13 @@
-use std::fs::File;
-use std::io::prelude::*;
+use std::fs::{self, OpenOptions, File};
+use std::io::Read;
+use std::path::Path;
 use quickxml_to_serde::{xml_string_to_json, Config, JsonType, JsonArray};
 use pyo3::prelude::*;
 use regex::Regex;
+use eyre::Result;
+use serde_json::Value;
 
-use std::path::Path;
 use chardet::{detect, charset2encoding};
-use std::fs::OpenOptions;
 use encoding::DecoderTrap;
 use encoding::label::encoding_from_whatwg_label;
 
@@ -134,58 +135,34 @@ fn try_convert_xml_to_json(xml: &str, config: &Config) -> Result<String, eyre::R
     
 fn preprocess_xml(input: &str) -> String {
     let mut processed_xml = input.to_string();
-    println!("Input XML (before preprocessing):");
+    println!("Preprocessing file");
     
     // Remove URLs encoded see gef-mx example
     let re = Regex::new(r"<https?://[^>]*>").unwrap();
     processed_xml = re.replace_all(&processed_xml, "").to_string();
 
-    // Fix mismatched tags
-    let re_mismatched = Regex::new(r"<(\w+)>.*?</(\w+)>").unwrap();
-    processed_xml = re_mismatched.replace_all(&processed_xml, |caps: &regex::Captures| {
-        if &caps[1] != &caps[2] {
-            format!("<{}></{}>", &caps[1], &caps[1])
-        } else {
-            caps[0].to_string()
-        }
-    }).to_string();
-
-    // Fix missing closing tags
-    let re_missing_closing = Regex::new(r"<(\w+)>([^<]+)$").unwrap();
-    processed_xml = re_missing_closing.replace_all(&processed_xml, "<$1>$2</$1>").to_string();
-
     return processed_xml
 }
+    
 
-#[pyfunction]
-pub fn convert(input: String, file: Option<String>, pretty: Option<bool>, arrays: Option<Vec<String>>) -> eyre::Result<Option<String>> {
 
-    let xml = if Path::new(&input).exists() {
+fn read_and_decode_xml(path: &Path) -> Result<String> {
+    let mut fh = OpenOptions::new().read(true).open(path)?;
+    let mut reader: Vec<u8> = Vec::new();
+    fh.read_to_end(&mut reader)?;
 
-        let mut fh = OpenOptions::new().read(true).open(&input).expect(
-            "Could not open file",
-        );
-        let mut reader: Vec<u8> = Vec::new();
-
-        fh.read_to_end(&mut reader).expect("Could not read file");
-        let result = detect(&reader);
-        let coder = encoding_from_whatwg_label(charset2encoding(&result.0));
-        if coder.is_some() {
-            let xml_contents = coder.unwrap().decode(&reader, DecoderTrap::Ignore);
-            match xml_contents {
-                Ok(res) => res,
-                Err(res) => return Err(eyre::eyre!(res)),
-            }
-        } else {
-            let mut xml_file = File::open(input)?;
-            let mut xml_contents = String::new();
-            xml_file.read_to_string(&mut xml_contents)?;
-            xml_contents
-        }
+    let result = detect(&reader);
+    let coder = encoding_from_whatwg_label(charset2encoding(&result.0));
+    if let Some(coder) = coder {
+        coder.decode(&reader, DecoderTrap::Ignore).map_err(|e| eyre::eyre!(e))
     } else {
-        input
-    };
+        let mut xml_contents = String::new();
+        File::open(path)?.read_to_string(&mut xml_contents)?;
+        Ok(xml_contents)
+    }
+}
 
+fn convert_xml_to_json(xml_content: &String, arrays: &Option<Vec<String>>) -> Result<Value> {
     let mut config = Config::new_with_defaults();
 
     if let Some(arrays) = arrays {
@@ -197,33 +174,70 @@ pub fn convert(input: String, file: Option<String>, pretty: Option<bool>, arrays
             config.json_type_overrides.insert(path.to_string(), JsonArray::Always(JsonType::Infer));
         }
     }
-
     config.xml_attr_prefix = "".into();
 
-    let final_xml = match try_convert_xml_to_json(&xml, &config) {
-        Ok(json) => return Ok(Some(json)),
-        Err(_) => preprocess_xml(&xml)
-    };
-    
-    let json = xml_string_to_json(final_xml, &config)?;
+    match try_convert_xml_to_json(&xml_content, &config) {
+        Ok(json_str) => Ok(serde_json::from_str(&json_str)?),
+        Err(_) => {
+            let preprocessed_xml = preprocess_xml(&xml_content);
+            Ok(xml_string_to_json(preprocessed_xml, &config)?)
+        }
+    }
+}
 
-    if let Some(output_file) = file {
-        let writer = std::io::BufWriter::new(std::fs::File::create(output_file)?);
+fn walk_and_convert(dir: &Path, arrays: &Option<Vec<String>>, unified_json: &mut Vec<Value>) -> eyre::Result<()> {
+    let entries = fs::read_dir(dir)?;
 
-        if pretty.is_some() && pretty.unwrap() {
-            serde_json::to_writer_pretty(writer, &json)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            walk_and_convert(&path, &arrays, unified_json)?;
+        } else if path.is_file() && path.extension().map_or(false, |ext| ext == "xml") && !path.to_string_lossy().ends_with("-org.xml") {
+            let xml_content = read_and_decode_xml(&path)?;
+            let json = convert_xml_to_json(&xml_content, &arrays)?;
+            unified_json.push(json);
+        }
+    }
+    Ok(())
+}
+
+#[pyfunction]
+pub fn convert(
+    path: String, 
+    pretty: Option<bool>, 
+    arrays: Option<Vec<String>>
+) -> Result<Option<String>> {
+    let p = Path::new(&path);
+
+    let mut unified_json: Vec<Value> = Vec::new();
+
+    if p.is_dir() {
+
+        walk_and_convert(&p, &arrays, &mut unified_json)?;
+        
+        let result = if pretty.unwrap_or(false) {
+            serde_json::to_string_pretty(&unified_json)?
         } else {
-            serde_json::to_writer(writer, &json)?;
-        } 
-        return Ok(None)
-    }
+            serde_json::to_string(&unified_json)?
+        };
 
-    if pretty.is_some() && pretty.unwrap() {
-        Ok(Some(serde_json::to_string_pretty(&json)?))
+
+        Ok(Some(result))
+    } else if p.is_file() && p.extension().map_or(true, |ext| ext != "xml") && !path.ends_with("-org.xml") {
+        let xml_content = read_and_decode_xml(&p)?;
+        let json = convert_xml_to_json(&xml_content, &arrays)?;
+
+        let result = if pretty.unwrap_or(false) {
+            serde_json::to_string_pretty(&json)?
+        } else {
+            serde_json::to_string(&json)?
+        };
+
+        Ok(Some(result))
     } else {
-        Ok(Some(serde_json::to_string(&json)?))
+        Err(eyre::eyre!("Invalid path provided. Ensure it's either an XML file or a directory containing XML files."))
     }
-
 }
 
 

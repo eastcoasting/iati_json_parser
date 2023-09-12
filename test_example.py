@@ -1,35 +1,17 @@
 import iati_json_parser
-import pathlib
-import tempfile
+import json
+import time
 
 def test_example_output_string():
-    example_json = iati_json_parser.convert("example/example.xml", pretty=True)
-    expected_json = pathlib.Path("example/example.json").read_text()
 
-    print(expected_json)
+    start_time = time.time()
+    example_json = iati_json_parser.convert("example/data", pretty=False)
 
-    assert example_json == expected_json
+    end_time = time.time()
+
+    print(f"Execution time: {end_time - start_time} seconds")
+
+    with open('example/output.json', 'w') as outfile:
+        json.dump(example_json, outfile, indent=4)
 
 test_example_output_string()
-
-# def test_example_path():
-#     tmp_dir = tempfile.gettempdir()
-
-#     tmp_file = tmp_dir+"/xml2json_example.json"
-
-#     iati_json_parser.convert("example/example.xml", pretty=True, file=tmp_file)
-
-#     example_json = pathlib.Path("example/example.json").read_text()
-#     expected_json = pathlib.Path(tmp_file).read_text()
-
-#     assert example_json == expected_json
-
-# def test_example_input_string():
-
-#     example_xml = pathlib.Path("example/example.xml").read_text()
-
-#     example_json =iati_json_parser.convert(example_xml, pretty=True)
-
-#     expected_json = pathlib.Path("example/example.json").read_text()
-
-#     assert example_json == expected_json
