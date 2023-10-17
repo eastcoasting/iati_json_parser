@@ -6,4 +6,11 @@ iati_json_parser/*.so
 _build
 /dist
 /venv
-/example
+/example/*
+/python
+/iterating
+.DS_Store
+output.json
+.DS_Store
+.vscode/settings.json
+raw_data/
