@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use zip::result;
 
 use std::path::Path;
 
@@ -6,13 +7,14 @@ use indicatif::ProgressBar;
 
 use converter::{
     convert_xml_to_json, read_and_decode_xml,
-    utils::{count_xml_files, download_zip, process_root},
+    utils::{count_xml_files, download_zip, process_root, supplement_root_files},
     walk_and_convert,
 };
 
 use pyo3::{pymodule, types::PyModule, wrap_pyfunction, PyResult, Python};
 
 pub mod converter;
+
 
 #[pyfunction]
 pub fn convert(path: Option<String>, pretty: Option<bool>) -> eyre::Result<Option<String>> {
@@ -25,16 +27,31 @@ pub fn convert(path: Option<String>, pretty: Option<bool>) -> eyre::Result<Optio
             "Beginning download of source data. This is a large file, timeout set to 15 minutes."
         );
         // Download the zip file if no path is provided
-        let zip_path = download_zip(
-            "https://gitlab.com/codeforIATI/iati-data/-/archive/main/iati-data-main.zip",
-        )?;
+        let zip_path = download_zip("https://data.iati-data-dump.opendataservices.coop/data.zip")?;
+        // "https://gitlab.com/codeforIATI/iati-data/-/archive/main/iati-data-main.zip",
 
         extraction_path = process_root(&zip_path)?;
     }
 
     let p = Path::new(&extraction_path);
 
+    println!("root path is {}", &p.display());
+
+    let supplemented_root_status = supplement_root_files()?;
+    println!("Supplemented root status: {}", supplemented_root_status);
+
     let total_files = count_xml_files(&p)?;
+
+    println!("total size is: {}", total_files);
+
+    // let result_text = "this is a blank";
+
+    // if result_text.is_empty() {
+    //     Err(eyre::eyre!("Error: String is empty"))
+    // } else {
+    //     Ok(Some(result_text.to_string()))
+    // }
+
     let mut current_count = 0;
     let pb = ProgressBar::new(total_files as u64);
 
@@ -53,6 +70,7 @@ pub fn convert(path: Option<String>, pretty: Option<bool>) -> eyre::Result<Optio
         && !extraction_path.ends_with("-org.xml")
     {
         let xml_content = read_and_decode_xml(&p)?;
+
         let json = convert_xml_to_json(&xml_content)?;
 
         let result = if pretty.unwrap_or(false) {

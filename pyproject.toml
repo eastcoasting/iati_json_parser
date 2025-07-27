@@ -1,10 +1,18 @@
 [project]
 name="iati_json_parser"
+version="0.1.3"
 description = "IATI XML to json parser"
 readme="README.md"
-repository="https://github.com/eastcoasting/iati_json_parser"
 license = {text= "MIT"}
+authors = [
+    {name = "Michael Owen", email = "michael@example.com"}
+]
+requires-python = ">=3.8"
 dependencies = ["xmlschema"]
+
+[project.urls]
+Homepage = "https://github.com/eastcoasting/iati_json_parser"
+Repository = "https://github.com/eastcoasting/iati_json_parser"
 
 [build-system]
 requires = ["maturin>=0.13,<0.14"]

@@ -14,3 +14,4 @@ output.json
 .DS_Store
 .vscode/settings.json
 raw_data/
+archive/

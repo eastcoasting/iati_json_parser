@@ -1,0 +1,4 @@
+# Python dependencies for development
+maturin>=0.13,<0.14
+pytest>=7.0.0
+xmlschema>=1.0.0 

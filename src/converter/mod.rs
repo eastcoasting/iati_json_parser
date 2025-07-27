@@ -16,31 +16,63 @@ use self::utils::{preprocess_xml, try_convert_xml_to_json};
 
 pub mod utils;
 
-fn read_xml(path: &Path) -> eyre::Result<String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| eyre::eyre!("Error reading XML file {:?}: {:?}", &path, e))?;
 
-    // Check for XML declaration or absence of HTML declaration
-    if !content.starts_with("<?xml") && content.contains("<!DOCTYPE html>") {
-        return Err(eyre::eyre!(
-            "The file {:?} does not seem to be a valid XML.",
-            path
-        ));
+use eyre::Report;
+
+fn read_xml(path: &Path) -> Result<String, Report> {
+    let attempt = fs::read_to_string(path);
+    match attempt {
+        Ok(content) => {
+            // Check for XML declaration or absence of HTML declaration
+            if !content.starts_with("<?xml") && content.contains("<!DOCTYPE html>") {
+                Err(eyre::eyre!(
+                    "The file {:?} does not seem to be a valid XML.",
+                    path
+                ))
+            } else {
+                Ok(content)
+            }
+        }
+        Err(_e) => {
+            // Read raw bytes
+            let bytes = fs::read(path)?;
+
+            // Check the first two bytes to guess the encoding
+            let decoded = if bytes.starts_with(&[0xFF, 0xFE]) {
+                // Detected UTF-16LE
+                let utf16_values: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect();
+                String::from_utf16(&utf16_values)
+            } else if bytes.starts_with(&[0xFE, 0xFF]) {
+                // Detected UTF-16BE
+                let utf16_values: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+                    .collect();
+                String::from_utf16(&utf16_values)
+            } else {
+                return Err(eyre::eyre!("Unable to determine encoding for {:?}", path));
+            };
+
+            match decoded {
+                Ok(content) => {
+                    if !content.starts_with("<?xml") && content.contains("<!DOCTYPE html>") {
+                        Err(eyre::eyre!(
+                            "The file {:?} decoded does not seem to be a valid XML.",
+                            path
+                        ))
+                    } else {
+                        Ok(content)
+                    }
+                }
+                Err(e) => Err(eyre::eyre!("UTF-16 decoding error: {:?}", e)),
+            }
+        }
     }
-
-    Ok(content).or_else(|_err: std::io::Error| {
-        let bytes = fs::read(path).map_err(eyre::Report::from)?;
-        let decoded = String::from_utf16(
-            &bytes
-                .as_slice()
-                .chunks_exact(2)
-                .map(|chunk| u16::from_ne_bytes([chunk[0], chunk[1]]))
-                .collect::<Vec<u16>>(),
-        )
-        .map_err(eyre::Report::from)?;
-        Ok(decoded)
-    })
 }
+
 
 pub fn read_and_decode_xml(path: &Path) -> Result<String> {
     let mut xml_contents = String::new();
@@ -62,6 +94,7 @@ pub fn convert_xml_to_json(xml_content: &String) -> Result<Value> {
         Ok(json_str) => Ok(serde_json::from_str(&json_str)?),
         Err(e) => {
             let preprocessed_xml = preprocess_xml(&xml_content);
+
             xml_string_to_json(preprocessed_xml, &config).map_err(|_| {
                 eyre::eyre!(
                     "Failed conversion after preprocessing. Original error: {}",
@@ -105,7 +138,6 @@ pub fn walk_and_convert(
                     let xml_content = match read_xml(&path) {
                         Ok(content) => content,
                         Err(e) => {
-                            println!("Error reading XML file {:?}: {}", &path, e);
                             return Err(eyre::eyre!("Error reading XML file {:?}: {}", &path, e));
                         }
                     };
@@ -113,7 +145,6 @@ pub fn walk_and_convert(
                     let json = match convert_xml_to_json(&xml_content) {
                         Ok(j) => j,
                         Err(e) => {
-                            println!("Error converting XML file {:?} to JSON: {}", &path, e);
                             return Err(eyre::eyre!(
                                 "Error converting XML file {:?} to JSON: {}",
                                 &path,
@@ -125,18 +156,27 @@ pub fn walk_and_convert(
                     let mut unified = Vec::new();
 
                     if let Some(activities) = json.get("iati-activities") {
-                        if let Some(activity_array) =
-                            activities.get("iati-activity").and_then(Value::as_array)
-                        {
+                    
+                        if let Some(activity_array) = activities.get("iati-activity").and_then(Value::as_array) {
+
+                            println!("Number of activities found: {}", activity_array.len());
+
                             for activity in activity_array {
                                 let filtered = filter_activity(activity);
                                 unified.push(filtered);
                             }
+                        } else if activities.get("iati-activity").is_some() {
+                            // Handle the single "iati-activity" that's not in array format
+                            let filtered = filter_activity(&activities.get("iati-activity").unwrap()); // unwrap is safe here due to the previous check
+                            unified.push(filtered);
+                        } else {
+                            println!("\n'iati-activity' key inside 'iati-activities' either doesn't exist or isn't an array.");
                         }
                     } else {
                         let filtered = filter_activity(&json);
                         unified.push(filtered);
                     }
+                    
 
                     *local_count += 1;
 
@@ -146,6 +186,9 @@ pub fn walk_and_convert(
                         path.parent().unwrap_or(&Path::new("Unknown"))
                     );
 
+                    println!("Final output length: {}", unified.len());
+
+
                     pb.inc(1);
                     Ok(unified)
                 } else {
@@ -154,6 +197,8 @@ pub fn walk_and_convert(
             },
         )
         .collect::<Vec<eyre::Result<Vec<Value>>>>();
+
+
 
     // Aggregate the results and update the global counter
     let mut results: Vec<Value> = Vec::new();
@@ -172,3 +217,4 @@ pub fn walk_and_convert(
 
     Ok(results)
 }
+
