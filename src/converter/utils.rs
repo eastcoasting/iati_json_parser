@@ -3,7 +3,7 @@ use eyre::Result;
 use quickxml_to_serde::{xml_string_to_json, Config};
 use regex::Regex;
 use reqwest;
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use zip::ZipArchive;
 
 // Standard Library Imports
@@ -49,10 +49,35 @@ pub fn preprocess_xml(input: &str) -> String {
     return processed_xml;
 }
 
-use serde_json::Map;
+fn is_human_text(s: &str) -> bool {
+    let t = s.trim();
+    if t.len() < 4 || !t.contains(' ') {
+        return false;
+    }
+    t.chars().any(|c| c.is_alphabetic())
+}
+
+fn collect_narratives(v: &Value, bag: &mut HashSet<String>) {
+    match v {
+        Value::Object(o) => {
+            for (k, v2) in o {
+                if k == "narrative" {
+                    if let Value::String(s) = v2 {
+                        if is_human_text(s) {
+                            bag.insert(s.trim().to_owned());
+                        }
+                    }
+                }
+                collect_narratives(v2, bag); // descend
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|v2| collect_narratives(v2, bag)),
+        _ => {}
+    }
+}
 
 pub fn filter_activity(activity: &Value) -> Value {
-    const DESIRED_KEYS: [&str; 12] = [
+    const KEEP: [&str; 12] = [
         "default-currency",
         "last-updated-datetime",
         "iati-identifier",
@@ -66,126 +91,206 @@ pub fn filter_activity(activity: &Value) -> Value {
         "location",
         "transaction",
     ];
-
-    let desired_keys = DESIRED_KEYS.iter().cloned().collect::<HashSet<_>>();
-
-    let mut filtered_activity = Map::new();
-
+    let wanted: HashSet<_> = KEEP.iter().cloned().collect();
     let obj = match activity.as_object() {
         Some(o) => o,
-        None => return Value::Object(filtered_activity),
+        None => return Value::Object(Map::new()),
     };
 
-    for (key, value) in obj {
-        if !desired_keys.contains(key.as_str()) {
-            continue;
-        }
+    //---------------- meta -----------------
+    let mut meta = Map::new();
 
-        match key.as_str() {
-            "description" => {
-                let descriptions = match value {
-                    Value::Array(arr) => arr.clone(),
-                    Value::Object(obj) => vec![Value::Object(obj.clone())],
-                    _ => vec![], // Default to an empty array
-                };
-                filtered_activity.insert(key.clone(), Value::Array(descriptions));
-            }
+    // sectors (all) + main purpose
+    if let Some(sec_val) = obj.get("sector") {
+        let src = match sec_val {
+            Value::Array(a) => a.clone(),
+            Value::Object(o) => vec![Value::Object(o.clone())],
+            _ => vec![],
+        };
 
-            "transaction" => {
-                let transactions = match value {
-                    Value::Array(arr) => arr.clone(),
-                    Value::Object(obj) => vec![Value::Object(obj.clone())],
-                    _ => continue,
-                };
-
-                let transformed_transactions: Vec<Value> = transactions
-                    .into_iter()
-                    .filter_map(|transaction| {
-                        let mut new_transaction = Map::new();
-
-                        // **Essential Field: "transaction-type" -> "code"**
-                        let transaction_type = transaction
-                            .get("transaction-type")
-                            .and_then(|tt| tt.get("code"))
-                            .cloned();
-                        if let Some(tt) = transaction_type {
-                            new_transaction.insert("transaction-type".to_string(), tt);
-                        } else {
-                            // Skip this transaction if "transaction-type" is missing
-                            return None;
-                        }
-
-                        // **Essential Field: "transaction-date" -> "iso-date"**
-                        let transaction_date = transaction
-                            .get("transaction-date")
-                            .and_then(|td| td.get("iso-date"))
-                            .cloned();
-                        if let Some(td) = transaction_date {
-                            new_transaction.insert("transaction-date".to_string(), td);
-                        } else {
-                            // Skip this transaction if "transaction-date" is missing
-                            return None;
-                        }
-
-                        // **Essential Field: "value" -> Text Content**
-                        if let Some(value_obj) = transaction.get("value") {
-                            // Attempt to parse the numerical value
-                            let transaction_value = value_obj
-                                .get("#text")
-                                .or_else(|| value_obj.get("value"))
-                                .cloned();
-
-                            // Ensure that the transaction value exists and is a number
-                            if let Some(tv) = transaction_value {
-                                new_transaction.insert("transaction-value".to_string(), tv);
-                            } else {
-                                // Skip this transaction if "transaction-value" is missing
-                                return None;
-                            }
-
-                            // **Optional Field: "currency"**
-                            if let Some(currency) = value_obj.get("currency").cloned() {
-                                new_transaction
-                                    .insert("transaction-currency".to_string(), currency);
-                            }
-                            // If "currency" is missing, omit the "transaction-currency" field
-                        } else {
-                            // Skip this transaction if "value" is missing
-                            return None;
-                        }
-
-                        Some(Value::Object(new_transaction))
-                    })
-                    .collect();
-
-                filtered_activity.insert(key.clone(), Value::Array(transformed_transactions));
-            }
-
-            "title" => {
-                if let Some(narrative) = value.get("narrative") {
-                    filtered_activity.insert(key.clone(), narrative.clone());
+        // build sector list
+        let mut sectors: Vec<Map<String, Value>> = src
+            .into_iter()
+            .filter_map(|s| {
+                let o = s.as_object()?;
+                let mut item = Map::new();
+                item.insert("dac_code".into(), o.get("code")?.clone());
+                if let Some(n) = o.get("narrative") {
+                    item.insert("name".into(), n.clone());
                 }
-            }
-            "reporting-org" => {
-                let mut new_reporting_org = Map::new();
-                if let Some(ref_val) = value.get("ref") {
-                    new_reporting_org.insert("id".to_string(), ref_val.clone());
+                if let Some(p) = o.get("percentage") {
+                    item.insert("percentage".into(), p.clone());
                 }
-                if let Some(type_val) = value.get("type") {
-                    new_reporting_org.insert("type".to_string(), type_val.clone());
-                }
-                if let Some(narrative) = value.get("narrative") {
-                    new_reporting_org.insert("name".to_string(), narrative.clone());
-                }
-                filtered_activity.insert(key.clone(), Value::Object(new_reporting_org));
-            }
-            _ => {
-                filtered_activity.insert(key.clone(), value.clone());
-            }
+                Some(item)
+            })
+            .collect();
+
+        if !sectors.is_empty() {
+            // select purpose = highest percentage or first
+            sectors.sort_by(|a, b| {
+                let pa = a.get("percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let pb = b.get("percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                pb.partial_cmp(&pa).unwrap() // descending
+            });
+            meta.insert(
+                "sectors".into(),
+                Value::Array(sectors.iter().cloned().map(Value::Object).collect()),
+            );
+            meta.insert("purpose".into(), Value::Object(sectors[0].clone()));
         }
     }
 
-    Value::Object(filtered_activity)
+    // policy‑markers
+    if let Some(pm) = obj.get("policy-marker") {
+        let src = match pm {
+            Value::Array(a) => a.clone(),
+            Value::Object(o) => vec![Value::Object(o.clone())],
+            _ => vec![],
+        };
+        let mks: Vec<Value> = src
+            .into_iter()
+            .filter_map(|v| {
+                let m = v.as_object()?;
+                let mut out = Map::new();
+                if let Some(c) = m.get("code") {
+                    out.insert("code".into(), c.clone());
+                }
+                if let Some(sig) = m.get("significance") {
+                    out.insert("significance".into(), sig.clone());
+                }
+                if let Some(n) = m.get("narrative") {
+                    out.insert("name".into(), n.clone());
+                }
+                (!out.is_empty()).then(|| Value::Object(out))
+            })
+            .collect();
+        if !mks.is_empty() {
+            meta.insert("policy_markers".into(), Value::Array(mks));
+        }
+    }
+
+    // single‑code helpers
+    let grab = |key: &str| -> Option<Value> {
+        obj.get(key)
+            .or_else(|| obj.get(&format!("default-{}", key)))
+            .and_then(|v| v.get("code"))
+            .cloned()
+    };
+    if let Some(v) = grab("aid-type") {
+        meta.insert("aid_type".into(), json!({"code":v}));
+    }
+    if let Some(v) = grab("finance-type") {
+        meta.insert("finance_type".into(), json!({"code":v}));
+    }
+
+    // related activities
+    if let Some(rel) = obj.get("related-activity") {
+        let src = match rel {
+            Value::Array(a) => a.clone(),
+            Value::Object(o) => vec![Value::Object(o.clone())],
+            _ => vec![],
+        };
+        let rels: Vec<Value> = src
+            .into_iter()
+            .filter_map(|v| {
+                let o = v.as_object()?;
+                let mut m = Map::new();
+                if let Some(r) = o.get("ref") {
+                    m.insert("ref".into(), r.clone());
+                }
+                if let Some(t) = o.get("type") {
+                    m.insert("type".into(), t.clone());
+                }
+                (!m.is_empty()).then(|| Value::Object(m))
+            })
+            .collect();
+        if !rels.is_empty() {
+            meta.insert("related_activities".into(), Value::Array(rels));
+        }
+    }
+
+    //---------------- core fields ----------------
+    let mut out = Map::new();
+    for (k, v) in obj {
+        if !wanted.contains(k.as_str()) {
+            continue;
+        }
+        match k.as_str() {
+            "description" => {
+                let arr = match v {
+                    Value::Array(a) => a.clone(),
+                    Value::Object(o) => vec![Value::Object(o.clone())],
+                    _ => vec![],
+                };
+                out.insert(k.clone(), Value::Array(arr));
+            }
+            "transaction" => {
+                let src = match v {
+                    Value::Array(a) => a.clone(),
+                    Value::Object(o) => vec![Value::Object(o.clone())],
+                    _ => vec![],
+                };
+                let txs: Vec<Value> = src
+                    .into_iter()
+                    .filter_map(|t| {
+                        let m = t.as_object()?;
+                        let tt = m.get("transaction-type")?.get("code")?;
+                        let td = m.get("transaction-date")?.get("iso-date")?;
+                        let val = m.get("value")?;
+                        let tv = val.get("#text").or_else(|| val.get("value"))?;
+                        let mut n = Map::new();
+                        n.insert("transaction-type".into(), tt.clone());
+                        n.insert("transaction-date".into(), td.clone());
+                        n.insert("transaction-value".into(), tv.clone());
+                        if let Some(c) = val.get("currency") {
+                            n.insert("transaction-currency".into(), c.clone());
+                        }
+                        Some(Value::Object(n))
+                    })
+                    .collect();
+                out.insert(k.clone(), Value::Array(txs));
+            }
+            "title" => {
+                if let Some(narr) = v.get("narrative") {
+                    out.insert(k.clone(), narr.clone());
+                }
+            }
+            "reporting-org" => {
+                let mut ro = Map::new();
+                if let Some(id) = v.get("ref") {
+                    ro.insert("id".into(), id.clone());
+                }
+                if let Some(t) = v.get("type") {
+                    ro.insert("type".into(), t.clone());
+                }
+                if let Some(n) = v.get("narrative") {
+                    ro.insert("name".into(), n.clone());
+                }
+                out.insert(k.clone(), Value::Object(ro));
+            }
+            _ => {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    if !meta.is_empty() {
+        out.insert("meta".into(), Value::Object(meta));
+    }
+
+    let mut bag = HashSet::new();
+    collect_narratives(activity, &mut bag); // use *original* activity
+    let free_text = bag.into_iter().collect::<Vec<_>>().join(" ");
+
+    if !free_text.is_empty() {
+        let meta_val = out
+            .entry("meta".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Value::Object(m) = meta_val {
+            m.insert("results".to_string(), Value::String(free_text));
+        }
+    }
+
+    Value::Object(out)
 }
 
 pub fn download_zip(url: &str) -> eyre::Result<PathBuf> {
